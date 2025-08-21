@@ -14,4 +14,5 @@
   "loggers": [
     "custom_components.poly_zone"
   ]
+
 }
