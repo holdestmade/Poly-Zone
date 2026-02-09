@@ -1,11 +1,13 @@
+import json
+import os
+
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import selector
-import os
-import json
 
 from .const import DOMAIN
+
 
 class PolyZoneConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Polygon Zone."""
@@ -20,24 +22,27 @@ class PolyZoneConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         errors = {}
         if user_input is not None:
-            # validate file exists
-            path = user_input.get("geojson_path")
-            if not os.path.exists(path):
+            path = user_input.get("geojson_path", "")
+            if not path or not os.path.isfile(path):
                 errors["base"] = "file_not_found"
             else:
-                # lightweight GeoJSON validation
                 try:
                     with open(path, "r", encoding="utf-8") as f:
                         data = json.load(f)
+
                     features = data.get("features")
-                    if not features:
+                    if not isinstance(features, list) or not features:
                         errors["base"] = "no_features"
                     else:
-                        geom = (features[0] or {}).get("geometry") or {}
-                        gtype = geom.get("type")
-                        if gtype not in ("Polygon", "MultiPolygon"):
+                        has_supported_geometry = False
+                        for feature in features:
+                            geometry = (feature or {}).get("geometry") or {}
+                            if geometry.get("type") in {"Polygon", "MultiPolygon"}:
+                                has_supported_geometry = True
+                                break
+                        if not has_supported_geometry:
                             errors["base"] = "unsupported_geom"
-                except Exception:
+                except (OSError, ValueError):
                     errors["base"] = "invalid_geojson"
 
             if not errors:
@@ -76,7 +81,9 @@ class PolyZoneOptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     vol.Optional(
                         "tolerance",
-                        default=self.config_entry.options.get("tolerance", self.config_entry.data.get("tolerance", 0)),
+                        default=self.config_entry.options.get(
+                            "tolerance", self.config_entry.data.get("tolerance", 0)
+                        ),
                     ): vol.Coerce(float),
                     vol.Optional(
                         "invert",
@@ -89,7 +96,7 @@ class PolyZoneOptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Optional(
                         "watch_interval",
                         default=self.config_entry.options.get("watch_interval", 60),
-                    ): vol.Coerce(int),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=5)),
                 }
             ),
         )
