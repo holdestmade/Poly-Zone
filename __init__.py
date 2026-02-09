@@ -21,7 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Lightweight file watcher (optional)
     watch = entry.options.get("watch_geojson", True)
-    interval = int(entry.options.get("watch_interval", 60))
+    interval = max(5, int(entry.options.get("watch_interval", 60)))
     geojson_path = entry.data.get("geojson_path")
 
     if DOMAIN not in hass.data:
@@ -36,7 +36,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except OSError:
             last_mtime = None
 
-        def _check_mtime(now):
+        def _check_mtime(_now):
             nonlocal last_mtime
             try:
                 mtime = os.path.getmtime(geojson_path)
@@ -49,7 +49,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif mtime and not last_mtime:
                 last_mtime = mtime
 
-        unsub = async_track_time_interval(hass, _check_mtime, timedelta(seconds=max(5, interval)))
+        unsub = async_track_time_interval(hass, _check_mtime, timedelta(seconds=interval))
         hass.data[DOMAIN][entry.entry_id] = {"unsub": unsub}
 
     return True
@@ -59,8 +59,8 @@ def _cleanup_watch(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if data and (unsub := data.get("unsub")):
         try:
             unsub()
-        except Exception:  # defensive
-            pass
+        except TypeError:
+            _LOGGER.debug("Watcher unsubscribe callback was invalid for %s", entry.entry_id)
     if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
         hass.data[DOMAIN].pop(entry.entry_id, None)
         if not hass.data[DOMAIN]:
