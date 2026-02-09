@@ -1,7 +1,7 @@
 {
   "domain": "poly_zone",
   "name": "Polygon Zone",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "documentation": "https://github.com/holdestmade/poly-zone",
   "issue_tracker": "https://github.com/holdestmade/poly-zone/issues",
   "codeowners": [
