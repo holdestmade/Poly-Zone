@@ -36,15 +36,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except OSError:
             last_mtime = None
 
+        _reloading = False
+
         def _check_mtime(_now):
-            nonlocal last_mtime
+            nonlocal last_mtime, _reloading
+            if _reloading:
+                return
             try:
                 mtime = os.path.getmtime(geojson_path)
             except OSError:
                 mtime = None
             if mtime and last_mtime and mtime != last_mtime:
-                _LOGGER.info("GeoJSON changed; reloading Polygon Zone for %s", entry.title)
                 last_mtime = mtime
+                _reloading = True
+                _LOGGER.info("GeoJSON changed; reloading Polygon Zone for %s", entry.title)
                 hass.async_create_task(hass.config_entries.async_reload(entry.entry_id))
             elif mtime and not last_mtime:
                 last_mtime = mtime

@@ -10,7 +10,7 @@ from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.event import async_track_state_change_event
 
-from .const import DOMAIN
+from .const import DOMAIN, METERS_PER_DEGREE_LAT, RAY_CAST_EPSILON
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +37,6 @@ def offset_polygon(
         return polygon
 
     new_polygon: list[tuple[float, float]] = []
-    meters_per_degree_lat = 111320.0
     for i, p2 in enumerate(polygon):
         p1 = polygon[i - 1]
         p3 = polygon[(i + 1) % len(polygon)]
@@ -48,6 +47,7 @@ def offset_polygon(
         mag1 = math.hypot(v1[0], v1[1])
         mag2 = math.hypot(v2[0], v2[1])
         if mag1 == 0 or mag2 == 0:
+            _LOGGER.debug("offset_polygon: skipping degenerate vertex at index %d", i)
             continue
 
         v1 = (v1[0] / mag1, v1[1] / mag1)
@@ -59,24 +59,34 @@ def offset_polygon(
         bisector = (n1[0] + n2[0], n1[1] + n2[1])
         mag_b = math.hypot(bisector[0], bisector[1])
         if mag_b == 0:
+            _LOGGER.debug("offset_polygon: zero-length bisector at index %d, skipping", i)
             continue
         bisector = (bisector[0] / mag_b, bisector[1] / mag_b)
 
         dot_product = v1[0] * v2[0] + v1[1] * v2[1]
         angle = math.acos(max(-1.0, min(1.0, dot_product)))
         if angle == 0:
+            _LOGGER.debug("offset_polygon: collinear edges at index %d, skipping", i)
             continue
 
         offset_distance = offset_meters / math.sin(angle / 2)
-        meters_per_degree_lon = meters_per_degree_lat * math.cos(math.radians(p2[1]))
+        meters_per_degree_lon = METERS_PER_DEGREE_LAT * math.cos(math.radians(p2[1]))
         if meters_per_degree_lon == 0:
+            _LOGGER.debug("offset_polygon: zero lon scale at index %d (polar point?), skipping", i)
             continue
 
         offset_lon = (offset_distance * bisector[0]) / meters_per_degree_lon
-        offset_lat = (offset_distance * bisector[1]) / meters_per_degree_lat
+        offset_lat = (offset_distance * bisector[1]) / METERS_PER_DEGREE_LAT
 
         new_polygon.append((p2[0] + offset_lon, p2[1] + offset_lat))
 
+    if len(new_polygon) < len(polygon):
+        _LOGGER.warning(
+            "offset_polygon: %d of %d vertices dropped due to degenerate geometry; "
+            "tolerance polygon may be inaccurate",
+            len(polygon) - len(new_polygon),
+            len(polygon),
+        )
     return new_polygon
 
 
@@ -170,7 +180,10 @@ def _point_in_polygon_fast(
     inside = False
     for (p1_lon, p1_lat), (p2_lon, p2_lat) in edges:
         if (p1_lat > lat) != (p2_lat > lat):
-            xints = (p2_lon - p1_lon) * (lat - p1_lat) / (p2_lat - p1_lat + 1e-18) + p1_lon
+            denom = p2_lat - p1_lat
+            if abs(denom) < RAY_CAST_EPSILON:
+                continue
+            xints = (p2_lon - p1_lon) * (lat - p1_lat) / denom + p1_lon
             if lon <= xints:
                 inside = not inside
     return inside
@@ -182,14 +195,16 @@ def _point_segment_distance_m(
     a: tuple[float, float],
     b: tuple[float, float],
 ) -> float:
-    meters_per_deg_lat = 111320.0
-    meters_per_deg_lon = meters_per_deg_lat * math.cos(math.radians(lat))
+    meters_per_deg_lon = METERS_PER_DEGREE_LAT * math.cos(math.radians(lat))
     ax = (a[0] - lon) * meters_per_deg_lon
-    ay = (a[1] - lat) * meters_per_deg_lat
+    ay = (a[1] - lat) * METERS_PER_DEGREE_LAT
     bx = (b[0] - lon) * meters_per_deg_lon
-    by = (b[1] - lat) * meters_per_deg_lat
+    by = (b[1] - lat) * METERS_PER_DEGREE_LAT
     abx, aby = (bx - ax), (by - ay)
-    ab2 = abx * abx + aby * aby or 1e-12
+    ab2 = abx * abx + aby * aby
+    if ab2 == 0:
+        # Degenerate segment: both endpoints are identical; distance to either point.
+        return math.hypot(ax, ay)
     t = max(0.0, min(1.0, -(ax * abx + ay * aby) / ab2))
     px, py = ax + t * abx, ay + t * aby
     return math.hypot(px, py)
@@ -206,16 +221,23 @@ def _min_distance_to_edges_m(
 # --- Platform setup ---
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
     name = entry.data["name"]
     geojson_path = entry.data["geojson_path"]
     device_tracker_entity_id = entry.data["device_tracker"]
     tolerance = float(entry.options.get("tolerance", entry.data.get("tolerance", 0)))
     invert = bool(entry.options.get("invert", False))
 
+    if not hass.states.get(device_tracker_entity_id):
+        _LOGGER.warning(
+            "Device tracker '%s' is not available yet. "
+            "Poly-Zone sensors will update once it reports a state.",
+            device_tracker_entity_id,
+        )
+
     rings, meta = await hass.async_add_executor_job(load_polygons_from_geojson, geojson_path)
     if not rings:
-        _LOGGER.error("No valid polygons found. Component will not be set up.")
+        _LOGGER.error("No valid polygons found in %s. Component will not be set up.", geojson_path)
         return
 
     entities: list[PolyZoneBinarySensor] = []
