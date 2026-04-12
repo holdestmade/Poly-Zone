@@ -1,9 +1,11 @@
 import json
 import os
+from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
 from .const import DOMAIN
@@ -16,10 +18,10 @@ class PolyZoneConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry):
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> "PolyZoneOptionsFlowHandler":
         return PolyZoneOptionsFlowHandler(config_entry)
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         errors = {}
         if user_input is not None:
             path = user_input.get("geojson_path", "")
@@ -70,7 +72,7 @@ class PolyZoneOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self.config_entry = config_entry
 
-    async def async_step_init(self, user_input=None):
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Manage the options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
