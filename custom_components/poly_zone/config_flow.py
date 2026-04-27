@@ -29,7 +29,7 @@ class PolyZoneConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> "PolyZoneOptionsFlowHandler":
-        return PolyZoneOptionsFlowHandler(config_entry)
+        return PolyZoneOptionsFlowHandler()
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors = {}
@@ -79,8 +79,7 @@ class PolyZoneConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class PolyZoneOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle an options flow for Polygon Zone."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+    # self.config_entry is set automatically by the HA flow manager; no __init__ needed.
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the options."""
