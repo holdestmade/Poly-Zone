@@ -1,11 +1,13 @@
-"""Unit tests for poly_zone binary_sensor geometric helpers."""
+"""Unit tests for poly_zone binary_sensor geometric helpers and entity logic."""
 import json
 import math
 import tempfile
 import os
 import pytest
+from unittest.mock import MagicMock, patch
 
 from custom_components.poly_zone.binary_sensor import (
+    PolyZoneBinarySensor,
     _bbox,
     _min_distance_to_edges_m,
     _normalize_ring,
@@ -122,6 +124,11 @@ class TestPointInPolygon:
         # The notch region should be outside.
         assert not _point_in_polygon_fast((1.5, 1.5), l_shape, edges, bbox)
 
+    def test_bbox_none_still_works(self):
+        # bbox=None should not raise and should fall through to ray-casting.
+        assert _point_in_polygon_fast((0.5, 0.5), self.poly, self.edges, None)
+        assert not _point_in_polygon_fast((2.0, 2.0), self.poly, self.edges, None)
+
 
 # ---------------------------------------------------------------------------
 # _point_segment_distance_m
@@ -203,8 +210,10 @@ class TestNormalizeRing:
 # ---------------------------------------------------------------------------
 
 class TestOffsetPolygon:
-    def test_zero_offset_returns_original(self):
-        assert offset_polygon(SQUARE, 0) is SQUARE
+    def test_zero_offset_returns_copy(self):
+        result = offset_polygon(SQUARE, 0)
+        assert result == SQUARE
+        assert result is not SQUARE  # must be a copy, not the same object
 
     def test_positive_offset_shrinks(self):
         # For a CCW polygon, inward normals mean a positive offset shrinks the polygon.
@@ -328,3 +337,264 @@ class TestLoadPolygonsFromGeojson:
             assert meta[0]["name"] == "My Zone"
         finally:
             os.unlink(path)
+
+    def test_polygon_with_hole_loaded(self):
+        # Outer ring: 0–2 degree square. Hole: 0.5–1.5 degree inner square.
+        outer = [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]]
+        hole = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5], [0.5, 0.5]]
+        path = self._write_geojson(
+            {"type": "FeatureCollection", "features": [
+                {"type": "Feature",
+                 "geometry": {"type": "Polygon", "coordinates": [outer, hole]},
+                 "properties": {"name": "Donut"}}
+            ]}
+        )
+        try:
+            rings, meta = load_polygons_from_geojson(path)
+            assert len(rings) == 1
+            assert len(meta[0]["holes"]) == 1
+            assert len(meta[0]["holes"][0]) >= 3
+        finally:
+            os.unlink(path)
+
+    def test_polygon_holes_stored_in_meta(self):
+        outer = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0], [0.0, 0.0]]
+        hole1 = [[0.5, 0.5], [1.0, 0.5], [1.0, 1.0], [0.5, 1.0], [0.5, 0.5]]
+        hole2 = [[1.5, 1.5], [2.5, 1.5], [2.5, 2.5], [1.5, 2.5], [1.5, 1.5]]
+        path = self._write_geojson(
+            {"type": "FeatureCollection", "features": [
+                {"type": "Feature",
+                 "geometry": {"type": "Polygon", "coordinates": [outer, hole1, hole2]},
+                 "properties": {}}
+            ]}
+        )
+        try:
+            rings, meta = load_polygons_from_geojson(path)
+            assert len(meta[0]["holes"]) == 2
+        finally:
+            os.unlink(path)
+
+    def test_no_holes_gives_empty_list(self):
+        coords = [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]]
+        path = self._write_geojson(
+            {"type": "FeatureCollection", "features": [
+                {"type": "Feature",
+                 "geometry": {"type": "Polygon", "coordinates": coords},
+                 "properties": {}}
+            ]}
+        )
+        try:
+            rings, meta = load_polygons_from_geojson(path)
+            assert meta[0]["holes"] == []
+        finally:
+            os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# PolyZoneBinarySensor entity
+# ---------------------------------------------------------------------------
+
+def _make_entry(entry_id="test_entry"):
+    entry = MagicMock()
+    entry.entry_id = entry_id
+    return entry
+
+
+def _make_sensor(
+    polygon=None,
+    holes=None,
+    zone_name="Test Zone",
+    device_tracker="device_tracker.test",
+    invert=False,
+    diagnostic=False,
+):
+    if polygon is None:
+        polygon = SQUARE
+    if holes is None:
+        holes = []
+    entry = _make_entry()
+    sensor = PolyZoneBinarySensor(
+        name="Test Device - Test Zone",
+        polygon=polygon,
+        holes=holes,
+        zone_name=zone_name,
+        device_tracker_entity_id=device_tracker,
+        entry=entry,
+        id_suffix="zone_1_exact",
+        entity_name="Inside Exact Zone",
+        invert=invert,
+        diagnostic=diagnostic,
+    )
+    # Attach a mock hass so _update_state can fire events without error.
+    sensor.hass = MagicMock()
+    sensor.entity_id = "binary_sensor.test_zone"
+    return sensor
+
+
+def _make_state(lat, lon):
+    state = MagicMock()
+    state.attributes = {"latitude": lat, "longitude": lon}
+    return state
+
+
+class TestPolyZoneBinarySensorInit:
+    def test_initial_state_is_off(self):
+        sensor = _make_sensor()
+        assert sensor.is_on is False
+
+    def test_unique_id_set(self):
+        sensor = _make_sensor()
+        assert "zone_1_exact" in sensor._attr_unique_id
+
+    def test_zone_name_in_attributes(self):
+        sensor = _make_sensor(zone_name="My Park")
+        attrs = sensor.extra_state_attributes
+        assert attrs["zone_name"] == "My Park"
+
+    def test_invert_reflected_in_attributes(self):
+        sensor = _make_sensor(invert=True)
+        assert sensor.extra_state_attributes["invert"] is True
+
+    def test_device_tracker_in_attributes(self):
+        sensor = _make_sensor(device_tracker="device_tracker.phone")
+        assert sensor.extra_state_attributes["device_tracker"] == "device_tracker.phone"
+
+    def test_holes_precomputed(self):
+        hole = [(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)]
+        sensor = _make_sensor(holes=[hole])
+        assert len(sensor._hole_edges) == 1
+        assert len(sensor._hole_bboxes) == 1
+
+
+class TestPolyZoneBinarySensorUpdateState:
+    def test_inside_polygon_turns_on(self):
+        sensor = _make_sensor()
+        sensor._update_state(_make_state(0.5, 0.5))
+        assert sensor.is_on is True
+
+    def test_outside_polygon_stays_off(self):
+        sensor = _make_sensor()
+        sensor._update_state(_make_state(5.0, 5.0))
+        assert sensor.is_on is False
+
+    def test_none_coordinates_turns_off(self):
+        sensor = _make_sensor()
+        sensor._update_state(_make_state(0.5, 0.5))
+        assert sensor.is_on is True
+        state = MagicMock()
+        state.attributes = {"latitude": None, "longitude": None}
+        sensor._update_state(state)
+        assert sensor.is_on is False
+
+    def test_invert_flips_state(self):
+        sensor = _make_sensor(invert=True)
+        # Inside the polygon → inverted sensor is OFF
+        sensor._update_state(_make_state(0.5, 0.5))
+        assert sensor.is_on is False
+        # Outside the polygon → inverted sensor is ON
+        sensor._update_state(_make_state(5.0, 5.0))
+        assert sensor.is_on is True
+
+    def test_distance_negative_when_inside(self):
+        sensor = _make_sensor()
+        sensor._update_state(_make_state(0.5, 0.5))
+        assert sensor._distance_m is not None
+        assert sensor._distance_m < 0  # inside → negative distance
+
+    def test_distance_positive_when_outside(self):
+        sensor = _make_sensor()
+        sensor._update_state(_make_state(5.0, 5.0))
+        assert sensor._distance_m is not None
+        assert sensor._distance_m > 0  # outside → positive distance
+
+    def test_distance_none_when_no_coordinates(self):
+        sensor = _make_sensor()
+        state = MagicMock()
+        state.attributes = {}
+        sensor._update_state(state)
+        assert sensor._distance_m is None
+
+    def test_last_transition_set_on_change(self):
+        sensor = _make_sensor()
+        assert sensor._last_transition is None
+        sensor._update_state(_make_state(0.5, 0.5))
+        assert sensor._last_transition is not None
+
+    def test_last_transition_not_updated_without_change(self):
+        sensor = _make_sensor()
+        sensor._update_state(_make_state(0.5, 0.5))
+        ts1 = sensor._last_transition
+        sensor._update_state(_make_state(0.4, 0.4))  # still inside
+        assert sensor._last_transition == ts1
+
+
+class TestPolyZoneBinarySensorHoles:
+    def _donut_sensor(self, invert=False):
+        # Outer ring: 0–2 degree square. Hole: 0.5–1.5 degree inner square.
+        outer = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]
+        hole = [(0.5, 0.5), (1.5, 0.5), (1.5, 1.5), (0.5, 1.5)]
+        return _make_sensor(polygon=outer, holes=[hole], invert=invert)
+
+    def test_point_in_outer_ring_not_in_hole_is_on(self):
+        sensor = self._donut_sensor()
+        # Point in outer ring but far from the hole
+        sensor._update_state(_make_state(0.2, 0.2))
+        assert sensor.is_on is True
+
+    def test_point_inside_hole_is_off(self):
+        sensor = self._donut_sensor()
+        # Centre of the hole — geometrically outside the donut zone
+        sensor._update_state(_make_state(1.0, 1.0))
+        assert sensor.is_on is False
+
+    def test_point_outside_outer_ring_is_off(self):
+        sensor = self._donut_sensor()
+        sensor._update_state(_make_state(5.0, 5.0))
+        assert sensor.is_on is False
+
+    def test_inverted_hole_point_is_on(self):
+        # With invert=True, being inside the hole (i.e. geometrically outside) → sensor ON
+        sensor = self._donut_sensor(invert=True)
+        sensor._update_state(_make_state(1.0, 1.0))
+        assert sensor.is_on is True
+
+
+class TestPolyZoneBinarySensorEvents:
+    def _sensor_with_hass(self):
+        sensor = _make_sensor()
+        hass = MagicMock()
+        sensor.hass = hass
+        sensor.entity_id = "binary_sensor.test_zone"
+        return sensor, hass
+
+    def test_enter_event_fired_on_entry(self):
+        sensor, hass = self._sensor_with_hass()
+        sensor._update_state(_make_state(0.5, 0.5))
+        hass.bus.async_fire.assert_called_once()
+        event_name, payload = hass.bus.async_fire.call_args[0]
+        assert event_name == "poly_zone_enter"
+        assert payload["in_zone"] is True
+
+    def test_exit_event_fired_on_exit(self):
+        sensor, hass = self._sensor_with_hass()
+        sensor._update_state(_make_state(0.5, 0.5))  # enter
+        hass.bus.async_fire.reset_mock()
+        sensor._update_state(_make_state(5.0, 5.0))  # exit
+        hass.bus.async_fire.assert_called_once()
+        event_name, payload = hass.bus.async_fire.call_args[0]
+        assert event_name == "poly_zone_exit"
+        assert payload["in_zone"] is False
+
+    def test_no_event_when_state_unchanged(self):
+        sensor, hass = self._sensor_with_hass()
+        sensor._update_state(_make_state(0.5, 0.5))  # enter
+        hass.bus.async_fire.reset_mock()
+        sensor._update_state(_make_state(0.4, 0.4))  # still inside
+        hass.bus.async_fire.assert_not_called()
+
+    def test_event_payload_contains_coordinates(self):
+        sensor, hass = self._sensor_with_hass()
+        sensor._update_state(_make_state(0.5, 0.3))
+        _, payload = hass.bus.async_fire.call_args[0]
+        assert payload["lat"] == pytest.approx(0.5)
+        assert payload["lon"] == pytest.approx(0.3)

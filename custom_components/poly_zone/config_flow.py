@@ -5,10 +5,20 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 
+try:
+    from homeassistant.config_entries import ConfigFlowResult
+except ImportError:  # HA < 2024.4
+    from homeassistant.data_entry_flow import FlowResult as ConfigFlowResult  # type: ignore[assignment]
+
 from .const import DOMAIN
+
+
+def _read_and_validate_geojson(path: str) -> dict[str, Any]:
+    """Read and parse a GeoJSON file. Runs in executor to avoid blocking the event loop."""
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)  # type: ignore[no-any-return]
 
 
 class PolyZoneConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -21,7 +31,7 @@ class PolyZoneConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> "PolyZoneOptionsFlowHandler":
         return PolyZoneOptionsFlowHandler(config_entry)
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors = {}
         if user_input is not None:
             path = user_input.get("geojson_path", "")
@@ -29,9 +39,9 @@ class PolyZoneConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "file_not_found"
             else:
                 try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-
+                    data = await self.hass.async_add_executor_job(
+                        _read_and_validate_geojson, path
+                    )
                     features = data.get("features")
                     if not isinstance(features, list) or not features:
                         errors["base"] = "no_features"
@@ -72,7 +82,7 @@ class PolyZoneOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self.config_entry = config_entry
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Manage the options."""
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
@@ -93,7 +103,7 @@ class PolyZoneOptionsFlowHandler(config_entries.OptionsFlow):
                     ): bool,
                     vol.Optional(
                         "watch_geojson",
-                        default=self.config_entry.options.get("watch_geojson", True),
+                        default=self.config_entry.options.get("watch_geojson", False),
                     ): bool,
                     vol.Optional(
                         "watch_interval",

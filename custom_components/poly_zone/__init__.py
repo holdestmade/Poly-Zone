@@ -1,11 +1,11 @@
 """The Polygon Zone custom component."""
 from datetime import timedelta
-import os
 import logging
+import os
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
 from homeassistant.const import Platform
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN
@@ -14,36 +14,37 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR]
 
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Polygon Zone from a config entry."""
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
-    # Lightweight file watcher (optional)
-    watch = entry.options.get("watch_geojson", True)
+    # File watcher is opt-in (default off) to avoid unexpected I/O overhead.
+    watch = entry.options.get("watch_geojson", False)
     interval = max(5, int(entry.options.get("watch_interval", 60)))
     geojson_path = entry.data.get("geojson_path")
 
     if DOMAIN not in hass.data:
         hass.data[DOMAIN] = {}
 
-    # Clean up any prior watcher for this entry
+    # Clean up any prior watcher for this entry before (re-)creating one.
     _cleanup_watch(hass, entry)
 
     if watch and geojson_path:
         try:
-            last_mtime = os.path.getmtime(geojson_path)
+            last_mtime = await hass.async_add_executor_job(os.path.getmtime, geojson_path)
         except OSError:
             last_mtime = None
 
         _reloading = False
 
-        def _check_mtime(_now):
+        async def _check_mtime(_now) -> None:
             nonlocal last_mtime, _reloading
             if _reloading:
                 return
             try:
-                mtime = os.path.getmtime(geojson_path)
+                mtime = await hass.async_add_executor_job(os.path.getmtime, geojson_path)
             except OSError:
                 mtime = None
             if mtime and last_mtime and mtime != last_mtime:
@@ -59,6 +60,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     return True
 
+
 def _cleanup_watch(hass: HomeAssistant, entry: ConfigEntry) -> None:
     data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if data and (unsub := data.get("unsub")):
@@ -71,10 +73,12 @@ def _cleanup_watch(hass: HomeAssistant, entry: ConfigEntry) -> None:
         if not hass.data[DOMAIN]:
             hass.data.pop(DOMAIN)
 
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     _cleanup_watch(hass, entry)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle a reload of the integration from the UI/options change."""
