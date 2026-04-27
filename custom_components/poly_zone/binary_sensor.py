@@ -4,7 +4,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
@@ -34,7 +34,8 @@ def offset_polygon(
 ) -> list[tuple[float, float]]:
     """Offset a polygon by a given number of meters (approximate)."""
     if not offset_meters:
-        return polygon
+        # Return a copy so callers cannot accidentally mutate the original.
+        return list(polygon)
 
     new_polygon: list[tuple[float, float]] = []
     for i, p2 in enumerate(polygon):
@@ -93,16 +94,29 @@ def offset_polygon(
 # --- GeoJSON loader ---
 
 
-def _coords_to_rings(geometry: dict[str, Any]) -> list[list[list[float]]]:
+def _coords_to_rings(
+    geometry: dict[str, Any],
+) -> list[tuple[list[list[float]], list[list[list[float]]]]]:
+    """Return (exterior_ring_coords, [hole_ring_coords, ...]) for each polygon in geometry."""
     gtype = geometry.get("type")
     coords = geometry.get("coordinates")
     if not isinstance(coords, list):
         return []
 
     if gtype == "Polygon":
-        return [coords[0]] if coords else []
+        if not coords:
+            return []
+        exterior = coords[0]
+        holes = coords[1:] if len(coords) > 1 else []
+        return [(exterior, holes)]
     if gtype == "MultiPolygon":
-        return [poly[0] for poly in coords if poly and isinstance(poly, list)]
+        result = []
+        for poly in coords:
+            if poly and isinstance(poly, list):
+                exterior = poly[0]
+                holes = poly[1:] if len(poly) > 1 else []
+                result.append((exterior, holes))
+        return result
     return []
 
 
@@ -130,15 +144,21 @@ def load_polygons_from_geojson(
         for idx, feat in enumerate(features):
             geometry = (feat or {}).get("geometry") or {}
             props = (feat or {}).get("properties") or {}
-            for ring_index, ring in enumerate(_coords_to_rings(geometry)):
-                normalized = _normalize_ring(ring)
+            for ring_index, (ring_coords, hole_coords) in enumerate(_coords_to_rings(geometry)):
+                normalized = _normalize_ring(ring_coords)
                 if len(normalized) >= 3:
+                    normalized_holes: list[list[tuple[float, float]]] = []
+                    for h_raw in hole_coords:
+                        h = _normalize_ring(h_raw)
+                        if len(h) >= 3:
+                            normalized_holes.append(h)
                     rings.append(normalized)
                     meta.append(
                         {
                             "feature_index": idx,
                             "ring_index": ring_index,
                             "name": props.get("name") or props.get("title"),
+                            "holes": normalized_holes,
                         }
                     )
         return rings, meta
@@ -151,8 +171,7 @@ def load_polygons_from_geojson(
 
 
 def _bbox(polygon: list[tuple[float, float]]) -> tuple[float, float, float, float]:
-    xs = [point[0] for point in polygon]
-    ys = [point[1] for point in polygon]
+    xs, ys = zip(*polygon)
     return (min(xs), min(ys), max(xs), max(ys))
 
 
@@ -170,7 +189,7 @@ def _point_in_polygon_fast(
     bbox: tuple[float, float, float, float] | None = None,
 ) -> bool:
     lon, lat = point
-    if bbox:
+    if bbox is not None:
         x1, y1, x2, y2 = bbox
         if not (x1 <= lon <= x2 and y1 <= lat <= y2):
             return False
@@ -243,7 +262,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     entities: list[PolyZoneBinarySensor] = []
     for i, ring in enumerate(rings):
         ring = ensure_ccw_winding(ring)
-        display = meta[i].get("name") or f"Zone {i + 1}"
+        zone_name = meta[i].get("name") or f"Zone {i + 1}"
+        holes = meta[i].get("holes", [])
         base_id = f"zone_{i + 1}"
 
         label_exact = "Outside Exact Zone" if invert else "Inside Exact Zone"
@@ -251,8 +271,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
         entities.append(
             PolyZoneBinarySensor(
-                f"{name} - {display}",
+                f"{name} - {zone_name}",
                 ring,
+                holes,
+                zone_name,
                 device_tracker_entity_id,
                 entry,
                 f"{base_id}_exact",
@@ -266,8 +288,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if offset_poly:
                 entities.append(
                     PolyZoneBinarySensor(
-                        f"{name} - {display}",
+                        f"{name} - {zone_name}",
                         offset_poly,
+                        holes,
+                        zone_name,
                         device_tracker_entity_id,
                         entry,
                         f"{base_id}_tolerance",
@@ -287,12 +311,14 @@ class PolyZoneBinarySensor(BinarySensorEntity):
     """Representation of a Polygon Zone binary sensor."""
 
     _attr_has_entity_name = True
-    _attr_device_class = "occupancy"
+    _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
 
     def __init__(
         self,
         name: str,
         polygon: list[tuple[float, float]],
+        holes: list[list[tuple[float, float]]],
+        zone_name: str,
         device_tracker_entity_id: str,
         entry: ConfigEntry,
         id_suffix: str,
@@ -301,6 +327,8 @@ class PolyZoneBinarySensor(BinarySensorEntity):
         diagnostic: bool = False,
     ) -> None:
         self._polygon = polygon
+        self._holes = holes
+        self._zone_name = zone_name
         self._device_tracker_entity_id = device_tracker_entity_id
         self._is_on = False
         self._latitude: float | None = None
@@ -311,13 +339,15 @@ class PolyZoneBinarySensor(BinarySensorEntity):
 
         self._bbox = _bbox(self._polygon)
         self._edges = _precompute_edges(self._polygon)
+        self._hole_edges = [_precompute_edges(h) for h in holes]
+        self._hole_bboxes = [_bbox(h) for h in holes]
 
         self._attr_name = entity_name
         self._attr_unique_id = f"{entry.entry_id}_{id_suffix}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=name,
-            manufacturer="Home Assistant",
+            manufacturer="Poly-Zone",
         )
         if diagnostic:
             self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -329,6 +359,7 @@ class PolyZoneBinarySensor(BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
+            "zone_name": self._zone_name,
             "device_tracker": self._device_tracker_entity_id,
             "latitude": self._latitude,
             "longitude": self._longitude,
@@ -345,6 +376,7 @@ class PolyZoneBinarySensor(BinarySensorEntity):
         )
         if initial_state := self.hass.states.get(self._device_tracker_entity_id):
             self._update_state(initial_state)
+            self.async_write_ha_state()
 
     @callback
     def _handle_state_change(self, event: Event) -> None:
@@ -360,16 +392,25 @@ class PolyZoneBinarySensor(BinarySensorEntity):
 
         prev = self._is_on
         if self._latitude is not None and self._longitude is not None:
-            inside = _point_in_polygon_fast(
-                (self._longitude, self._latitude),
+            point = (self._longitude, self._latitude)
+            inside_geo = _point_in_polygon_fast(
+                point,
                 self._polygon,
                 self._edges,
                 self._bbox,
             )
-            self._is_on = (not inside) if self._invert else inside
-            self._distance_m = _min_distance_to_edges_m(
-                self._longitude, self._latitude, self._edges
-            )
+            # A point inside a hole is geometrically outside the polygon.
+            if inside_geo and self._holes:
+                for h_poly, h_edges, h_bbox in zip(
+                    self._holes, self._hole_edges, self._hole_bboxes
+                ):
+                    if _point_in_polygon_fast(point, h_poly, h_edges, h_bbox):
+                        inside_geo = False
+                        break
+            self._is_on = (not inside_geo) if self._invert else inside_geo
+            raw_dist = _min_distance_to_edges_m(self._longitude, self._latitude, self._edges)
+            # Negative = inside the exterior boundary, positive = outside.
+            self._distance_m = -raw_dist if inside_geo else raw_dist
         else:
             self._is_on = False
             self._distance_m = None

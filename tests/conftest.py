@@ -23,13 +23,27 @@ for _mod in _HA_MODULES:
 # Provide a real BinarySensorEntity base class so PolyZoneBinarySensor can
 # inherit from it without error.
 class _BinarySensorEntity:
-    pass
+    def async_write_ha_state(self):
+        pass
+
+    def async_on_remove(self, func):
+        pass
+
 
 sys.modules["homeassistant.components.binary_sensor"].BinarySensorEntity = _BinarySensorEntity
+
+
+class _BinarySensorDeviceClass:
+    OCCUPANCY = "occupancy"
+
+
+sys.modules["homeassistant.components.binary_sensor"].BinarySensorDeviceClass = _BinarySensorDeviceClass
+
 
 # EntityCategory needs to be an enum-like object with a DIAGNOSTIC attribute.
 class _EntityCategory:
     DIAGNOSTIC = "diagnostic"
+
 
 sys.modules["homeassistant.helpers.entity"].EntityCategory = _EntityCategory
 sys.modules["homeassistant.helpers.entity"].DeviceInfo = dict
