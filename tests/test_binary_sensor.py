@@ -256,13 +256,12 @@ class TestOffsetPolygon:
         assert abs(new_bbox[0] - expected_inset_deg) < 1e-3
         assert abs(new_bbox[2] - (1.0 - expected_inset_deg)) < 1e-3
 
-    def test_excessive_offset_returns_empty(self, caplog):
-        import logging
+    def test_excessive_offset_returns_empty(self):
         # Shrinking a 1° square by an absurd amount collapses it.
-        with caplog.at_level(logging.WARNING, logger="custom_components.poly_zone.binary_sensor"):
-            result = offset_polygon(SQUARE, 10_000_000)
+        # offset_polygon stays silent — the caller is expected to log a
+        # warning that names the affected zone.
+        result = offset_polygon(SQUARE, 10_000_000)
         assert result == []
-        assert any("collapsed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

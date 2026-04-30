@@ -72,11 +72,6 @@ def offset_polygon(
     buffered = geom.buffer(-offset_meters, join_style="mitre", mitre_limit=5.0)
     result = _largest_polygon(buffered)
     if result is None:
-        _LOGGER.warning(
-            "offset_polygon: %.1f m offset collapsed the polygon; "
-            "tolerance zone will be empty",
-            offset_meters,
-        )
         return []
 
     unprojected = shapely_transform(to_lonlat, result)
@@ -294,6 +289,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                         invert,
                         diagnostic=True,
                     )
+                )
+            else:
+                _LOGGER.warning(
+                    "Zone '%s' is smaller than the %.1f m tolerance and was "
+                    "fully consumed; no tolerance sensor will be created. "
+                    "Reduce the tolerance or enlarge the zone to fix this.",
+                    zone_name,
+                    tolerance,
                 )
 
     async_add_entities(entities)
