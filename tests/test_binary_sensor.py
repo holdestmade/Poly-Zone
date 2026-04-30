@@ -215,26 +215,26 @@ class TestOffsetPolygon:
         assert result == SQUARE
         assert result is not SQUARE  # must be a copy, not the same object
 
-    def test_positive_offset_shrinks(self):
-        # For a CCW polygon, inward normals mean a positive offset shrinks the polygon.
-        # This matches the "inner tolerance zone" use-case.
+    def test_positive_offset_expands(self):
+        # Positive tolerance grows the polygon outward — a buffer ring around
+        # the configured zone that absorbs GPS jitter.
         result = offset_polygon(SQUARE, 100)
         orig_bbox = _bbox(SQUARE)
         new_bbox = _bbox(result)
-        assert new_bbox[0] > orig_bbox[0]  # min x moved inward (larger)
-        assert new_bbox[1] > orig_bbox[1]  # min y moved inward (larger)
-        assert new_bbox[2] < orig_bbox[2]  # max x moved inward (smaller)
-        assert new_bbox[3] < orig_bbox[3]  # max y moved inward (smaller)
+        assert new_bbox[0] < orig_bbox[0]  # min x moved outward (smaller)
+        assert new_bbox[1] < orig_bbox[1]  # min y moved outward (smaller)
+        assert new_bbox[2] > orig_bbox[2]  # max x moved outward (larger)
+        assert new_bbox[3] > orig_bbox[3]  # max y moved outward (larger)
 
-    def test_negative_offset_expands(self):
-        # A negative offset moves vertices outward, expanding the polygon.
+    def test_negative_offset_shrinks(self):
+        # A negative offset shrinks the polygon inward.
         result = offset_polygon(SQUARE, -100)
         orig_bbox = _bbox(SQUARE)
         new_bbox = _bbox(result)
-        assert new_bbox[0] < orig_bbox[0]
-        assert new_bbox[1] < orig_bbox[1]
-        assert new_bbox[2] > orig_bbox[2]
-        assert new_bbox[3] > orig_bbox[3]
+        assert new_bbox[0] > orig_bbox[0]
+        assert new_bbox[1] > orig_bbox[1]
+        assert new_bbox[2] < orig_bbox[2]
+        assert new_bbox[3] < orig_bbox[3]
 
     def test_duplicate_vertex_handled_without_warning(self, caplog):
         import logging
@@ -248,21 +248,19 @@ class TestOffsetPolygon:
 
     def test_offset_distance_accurate_in_metres(self):
         # A 1° × 1° square at the equator is roughly 111 km on a side.
-        # Shrinking by 1000 m should move each side inward by ~1000 m,
+        # Expanding by 1000 m should move each side outward by ~1000 m,
         # i.e. ~0.009° of latitude.
         result = offset_polygon(SQUARE, 1000)
         new_bbox = _bbox(result)
-        expected_inset_deg = 1000.0 / METERS_PER_DEGREE_LAT
-        assert abs(new_bbox[0] - expected_inset_deg) < 1e-3
-        assert abs(new_bbox[2] - (1.0 - expected_inset_deg)) < 1e-3
+        expected_offset_deg = 1000.0 / METERS_PER_DEGREE_LAT
+        assert abs(new_bbox[0] - (-expected_offset_deg)) < 1e-3
+        assert abs(new_bbox[2] - (1.0 + expected_offset_deg)) < 1e-3
 
-    def test_excessive_offset_returns_empty(self, caplog):
-        import logging
-        # Shrinking a 1° square by an absurd amount collapses it.
-        with caplog.at_level(logging.WARNING, logger="custom_components.poly_zone.binary_sensor"):
-            result = offset_polygon(SQUARE, 10_000_000)
+    def test_excessive_negative_offset_returns_empty(self):
+        # A negative offset large enough to collapse the polygon yields an
+        # empty result rather than raising.
+        result = offset_polygon(SQUARE, -10_000_000)
         assert result == []
-        assert any("collapsed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

@@ -47,10 +47,11 @@ def offset_polygon(
 ) -> list[tuple[float, float]]:
     """Offset a polygon by a given distance in metres.
 
-    Positive ``offset_meters`` shrinks the polygon inward; negative grows it
-    outward. The offset is computed in a local azimuthal-equidistant
-    projection centred on the polygon's centroid, so distances are accurate
-    in metres regardless of latitude.
+    Positive ``offset_meters`` grows the polygon outward (the "tolerance"
+    use case — a buffer ring outside the configured zone that absorbs GPS
+    jitter); negative shrinks it inward. The offset is computed in a local
+    azimuthal-equidistant projection centred on the polygon's centroid, so
+    distances are accurate in metres regardless of latitude.
     """
     if not offset_meters:
         return list(polygon)
@@ -69,14 +70,9 @@ def offset_polygon(
     to_lonlat = Transformer.from_crs(proj, "EPSG:4326", always_xy=True).transform
 
     geom = shapely_transform(to_metres, Polygon(polygon))
-    buffered = geom.buffer(-offset_meters, join_style="mitre", mitre_limit=5.0)
+    buffered = geom.buffer(offset_meters, join_style="mitre", mitre_limit=5.0)
     result = _largest_polygon(buffered)
     if result is None:
-        _LOGGER.warning(
-            "offset_polygon: %.1f m offset collapsed the polygon; "
-            "tolerance zone will be empty",
-            offset_meters,
-        )
         return []
 
     unprojected = shapely_transform(to_lonlat, result)
