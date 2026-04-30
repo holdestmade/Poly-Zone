@@ -9,6 +9,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.event import async_track_state_change_event
+from pyproj import Transformer
+from shapely.geometry import Polygon
+from shapely.ops import transform as shapely_transform
 
 from .const import DOMAIN, METERS_PER_DEGREE_LAT, RAY_CAST_EPSILON
 
@@ -29,66 +32,58 @@ def ensure_ccw_winding(polygon: list[tuple[float, float]]) -> list[tuple[float, 
     return polygon
 
 
+def _largest_polygon(geom: Any) -> Polygon | None:
+    if geom.is_empty:
+        return None
+    if geom.geom_type == "Polygon":
+        return geom
+    if geom.geom_type == "MultiPolygon":
+        return max(geom.geoms, key=lambda g: g.area)
+    return None
+
+
 def offset_polygon(
     polygon: list[tuple[float, float]], offset_meters: float
 ) -> list[tuple[float, float]]:
-    """Offset a polygon by a given number of meters (approximate)."""
+    """Offset a polygon by a given distance in metres.
+
+    Positive ``offset_meters`` shrinks the polygon inward; negative grows it
+    outward. The offset is computed in a local azimuthal-equidistant
+    projection centred on the polygon's centroid, so distances are accurate
+    in metres regardless of latitude.
+    """
     if not offset_meters:
-        # Return a copy so callers cannot accidentally mutate the original.
         return list(polygon)
 
-    new_polygon: list[tuple[float, float]] = []
-    for i, p2 in enumerate(polygon):
-        p1 = polygon[i - 1]
-        p3 = polygon[(i + 1) % len(polygon)]
+    if len(polygon) < 3:
+        return []
 
-        v1 = (p2[0] - p1[0], p2[1] - p1[1])
-        v2 = (p3[0] - p2[0], p3[1] - p2[1])
+    centroid_lon = sum(p[0] for p in polygon) / len(polygon)
+    centroid_lat = sum(p[1] for p in polygon) / len(polygon)
 
-        mag1 = math.hypot(v1[0], v1[1])
-        mag2 = math.hypot(v2[0], v2[1])
-        if mag1 == 0 or mag2 == 0:
-            _LOGGER.debug("offset_polygon: skipping degenerate vertex at index %d", i)
-            continue
+    proj = (
+        f"+proj=aeqd +lat_0={centroid_lat} +lon_0={centroid_lon} "
+        "+datum=WGS84 +units=m +no_defs"
+    )
+    to_metres = Transformer.from_crs("EPSG:4326", proj, always_xy=True).transform
+    to_lonlat = Transformer.from_crs(proj, "EPSG:4326", always_xy=True).transform
 
-        v1 = (v1[0] / mag1, v1[1] / mag1)
-        v2 = (v2[0] / mag2, v2[1] / mag2)
-
-        n1 = (-v1[1], v1[0])
-        n2 = (-v2[1], v2[0])
-
-        bisector = (n1[0] + n2[0], n1[1] + n2[1])
-        mag_b = math.hypot(bisector[0], bisector[1])
-        if mag_b == 0:
-            _LOGGER.debug("offset_polygon: zero-length bisector at index %d, skipping", i)
-            continue
-        bisector = (bisector[0] / mag_b, bisector[1] / mag_b)
-
-        dot_product = v1[0] * v2[0] + v1[1] * v2[1]
-        angle = math.acos(max(-1.0, min(1.0, dot_product)))
-        if angle == 0:
-            _LOGGER.debug("offset_polygon: collinear edges at index %d, skipping", i)
-            continue
-
-        offset_distance = offset_meters / math.sin(angle / 2)
-        meters_per_degree_lon = METERS_PER_DEGREE_LAT * math.cos(math.radians(p2[1]))
-        if meters_per_degree_lon == 0:
-            _LOGGER.debug("offset_polygon: zero lon scale at index %d (polar point?), skipping", i)
-            continue
-
-        offset_lon = (offset_distance * bisector[0]) / meters_per_degree_lon
-        offset_lat = (offset_distance * bisector[1]) / METERS_PER_DEGREE_LAT
-
-        new_polygon.append((p2[0] + offset_lon, p2[1] + offset_lat))
-
-    if len(new_polygon) < len(polygon):
+    geom = shapely_transform(to_metres, Polygon(polygon))
+    buffered = geom.buffer(-offset_meters, join_style="mitre", mitre_limit=5.0)
+    result = _largest_polygon(buffered)
+    if result is None:
         _LOGGER.warning(
-            "offset_polygon: %d of %d vertices dropped due to degenerate geometry; "
-            "tolerance polygon may be inaccurate",
-            len(polygon) - len(new_polygon),
-            len(polygon),
+            "offset_polygon: %.1f m offset collapsed the polygon; "
+            "tolerance zone will be empty",
+            offset_meters,
         )
-    return new_polygon
+        return []
+
+    unprojected = shapely_transform(to_lonlat, result)
+    coords = list(unprojected.exterior.coords)
+    if len(coords) > 1 and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    return [(float(x), float(y)) for x, y in coords]
 
 
 # --- GeoJSON loader ---

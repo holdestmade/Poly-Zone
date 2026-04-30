@@ -1,13 +1,16 @@
 {
   "domain": "poly_zone",
   "name": "Polygon Zone",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "documentation": "https://github.com/holdestmade/poly-zone",
   "issue_tracker": "https://github.com/holdestmade/poly-zone/issues",
   "codeowners": [
     "@holdestmade"
   ],
-  "requirements": [],
+  "requirements": [
+    "shapely>=2.0.0",
+    "pyproj>=3.4.0"
+  ],
   "iot_class": "local_push",
   "config_flow": true,
   "dependencies": [],

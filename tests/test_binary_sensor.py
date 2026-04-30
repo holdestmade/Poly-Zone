@@ -236,14 +236,33 @@ class TestOffsetPolygon:
         assert new_bbox[2] > orig_bbox[2]
         assert new_bbox[3] > orig_bbox[3]
 
-    def test_degenerate_vertex_dropped_with_warning(self, caplog):
+    def test_duplicate_vertex_handled_without_warning(self, caplog):
         import logging
         # Polygon with a duplicate consecutive vertex (zero-length edge).
+        # Shapely cleans this up automatically — no warnings expected.
         poly = [(0.0, 0.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
         with caplog.at_level(logging.WARNING, logger="custom_components.poly_zone.binary_sensor"):
             result = offset_polygon(poly, 100)
-        assert len(result) < len(poly)
-        assert any("dropped" in r.message for r in caplog.records)
+        assert len(result) >= 3
+        assert not any("dropped" in r.message for r in caplog.records)
+
+    def test_offset_distance_accurate_in_metres(self):
+        # A 1° × 1° square at the equator is roughly 111 km on a side.
+        # Shrinking by 1000 m should move each side inward by ~1000 m,
+        # i.e. ~0.009° of latitude.
+        result = offset_polygon(SQUARE, 1000)
+        new_bbox = _bbox(result)
+        expected_inset_deg = 1000.0 / METERS_PER_DEGREE_LAT
+        assert abs(new_bbox[0] - expected_inset_deg) < 1e-3
+        assert abs(new_bbox[2] - (1.0 - expected_inset_deg)) < 1e-3
+
+    def test_excessive_offset_returns_empty(self, caplog):
+        import logging
+        # Shrinking a 1° square by an absurd amount collapses it.
+        with caplog.at_level(logging.WARNING, logger="custom_components.poly_zone.binary_sensor"):
+            result = offset_polygon(SQUARE, 10_000_000)
+        assert result == []
+        assert any("collapsed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
