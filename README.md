@@ -22,7 +22,7 @@ Polygon Zone is a custom Home Assistant integration that creates binary sensors 
 The initial setup flow asks for:
 
 - **Name**: Friendly device name shown in Home Assistant.
-- **GeoJSON path**: Absolute path to a local GeoJSON file.
+- **GeoJSON path**: Absolute filesystem path to a local GeoJSON file that Home Assistant can read. For a file stored at `config/www/home_poly_zone.json` inside your HA config directory, enter `/config/www/home_poly_zone.json` (HA OS / Container / Supervised). On Core venv installs, use the real path, e.g. `/home/homeassistant/.homeassistant/www/home_poly_zone.json`. This is a filesystem path, not a URL like `/local/...`. The file extension does not matter as long as the contents are valid GeoJSON.
 - **Device tracker**: A `device_tracker.*` entity to monitor.
 - **Tolerance (meters)**: Optional expansion distance for a secondary diagnostic sensor.
 
