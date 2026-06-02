@@ -14,7 +14,6 @@ from custom_components.poly_zone.binary_sensor import (
     _point_in_polygon_fast,
     _point_segment_distance_m,
     _precompute_edges,
-    ensure_ccw_winding,
     load_polygons_from_geojson,
     offset_polygon,
 )
@@ -26,26 +25,6 @@ from custom_components.poly_zone.const import METERS_PER_DEGREE_LAT
 
 # A simple 1° × 1° square centred near the equator (lon 0–1, lat 0–1).
 SQUARE = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
-# Same square wound clockwise.
-SQUARE_CW = list(reversed(SQUARE))
-
-
-# ---------------------------------------------------------------------------
-# ensure_ccw_winding
-# ---------------------------------------------------------------------------
-
-class TestEnsureCcwWinding:
-    def test_ccw_unchanged(self):
-        result = ensure_ccw_winding(SQUARE)
-        assert result == SQUARE
-
-    def test_cw_reversed(self):
-        result = ensure_ccw_winding(SQUARE_CW)
-        assert result == SQUARE
-
-    def test_already_ccw_triangle(self):
-        tri = [(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]
-        assert ensure_ccw_winding(tri) == tri
 
 
 # ---------------------------------------------------------------------------
@@ -515,21 +494,23 @@ class TestPolyZoneBinarySensorUpdateState:
     def test_distance_negative_when_inside(self):
         sensor = _make_sensor()
         sensor._update_state(_make_state(0.5, 0.5))
-        assert sensor._distance_m is not None
-        assert sensor._distance_m < 0  # inside → negative distance
+        dist = sensor.extra_state_attributes["distance_to_edge_m"]
+        assert dist is not None
+        assert dist < 0  # inside → negative distance
 
     def test_distance_positive_when_outside(self):
         sensor = _make_sensor()
         sensor._update_state(_make_state(5.0, 5.0))
-        assert sensor._distance_m is not None
-        assert sensor._distance_m > 0  # outside → positive distance
+        dist = sensor.extra_state_attributes["distance_to_edge_m"]
+        assert dist is not None
+        assert dist > 0  # outside → positive distance
 
     def test_distance_none_when_no_coordinates(self):
         sensor = _make_sensor()
         state = MagicMock()
         state.attributes = {}
         sensor._update_state(state)
-        assert sensor._distance_m is None
+        assert sensor.extra_state_attributes["distance_to_edge_m"] is None
 
     def test_last_transition_set_on_change(self):
         sensor = _make_sensor()
@@ -574,6 +555,21 @@ class TestPolyZoneBinarySensorHoles:
         sensor = self._donut_sensor(invert=True)
         sensor._update_state(_make_state(1.0, 1.0))
         assert sensor.is_on is True
+
+    def test_distance_uses_nearest_hole_edge(self):
+        # A point just inside the hole is geometrically outside the zone, and its
+        # nearest boundary is the hole edge — not the far exterior ring. The
+        # reported (positive) distance should be small, not the distance to the
+        # outer ring.
+        sensor = self._donut_sensor()
+        # Hole spans lat/lon 0.5–1.5; sit just inside its lower edge.
+        sensor._update_state(_make_state(0.51, 1.0))
+        dist = sensor.extra_state_attributes["distance_to_edge_m"]
+        assert dist is not None
+        assert dist > 0  # inside the hole → outside the zone
+        # ~0.01° of latitude ≈ 1113 m to the hole edge; far less than the
+        # >50 km distance to the outer ring.
+        assert dist < 2000
 
 
 class TestPolyZoneBinarySensorEvents:
