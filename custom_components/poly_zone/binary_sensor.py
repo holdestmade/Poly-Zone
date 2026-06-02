@@ -17,19 +17,11 @@ from .const import DOMAIN, METERS_PER_DEGREE_LAT, RAY_CAST_EPSILON
 
 _LOGGER = logging.getLogger(__name__)
 
-# --- Helpers: winding/offset ---
-
-
-def ensure_ccw_winding(polygon: list[tuple[float, float]]) -> list[tuple[float, float]]:
-    """Ensure polygon winding is counter-clockwise (area > 0)."""
-    area = 0.0
-    for i, p1 in enumerate(polygon):
-        p2 = polygon[(i + 1) % len(polygon)]
-        area += (p1[0] * p2[1]) - (p2[0] * p1[1])
-    if area < 0:
-        _LOGGER.debug("Polygon has clockwise winding, reversing.")
-        return polygon[::-1]
-    return polygon
+# --- Helpers: offset ---
+#
+# Note: the ray-casting point-in-polygon test below is winding-agnostic (it
+# counts edge-crossing parity), so polygon rings are used as-loaded from the
+# GeoJSON without normalising their winding direction.
 
 
 def _largest_polygon(geom: Any) -> Polygon | None:
@@ -252,7 +244,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     entities: list[PolyZoneBinarySensor] = []
     for i, ring in enumerate(rings):
-        ring = ensure_ccw_winding(ring)
         zone_name = meta[i].get("name") or f"Zone {i + 1}"
         holes = meta[i].get("holes", [])
         base_id = f"zone_{i + 1}"
@@ -277,11 +268,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         if tolerance > 0:
             offset_poly = offset_polygon(ring, tolerance)
             if offset_poly:
+                # The tolerated zone grows outward, so its holes (voids) shrink
+                # inward by the same distance; holes that collapse are dropped.
+                tol_holes: list[list[tuple[float, float]]] = []
+                for hole in holes:
+                    shrunk = offset_polygon(hole, -tolerance)
+                    if len(shrunk) >= 3:
+                        tol_holes.append(shrunk)
                 entities.append(
                     PolyZoneBinarySensor(
                         f"{name} - {zone_name}",
                         offset_poly,
-                        holes,
+                        tol_holes,
                         zone_name,
                         device_tracker_entity_id,
                         entry,
@@ -293,6 +291,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 )
 
     async_add_entities(entities)
+
+    # A single state-change listener feeds every zone sensor, rather than each
+    # entity subscribing independently to the same device tracker.
+    @callback
+    def _handle_state_change(event: Event) -> None:
+        new_state = event.data.get("new_state")
+        if new_state is None:
+            return
+        for entity in entities:
+            entity.update_from_shared_state(new_state)
+
+    entry.async_on_unload(
+        async_track_state_change_event(
+            hass, device_tracker_entity_id, _handle_state_change
+        )
+    )
 
 
 # --- Entity ---
@@ -322,9 +336,9 @@ class PolyZoneBinarySensor(BinarySensorEntity):
         self._zone_name = zone_name
         self._device_tracker_entity_id = device_tracker_entity_id
         self._is_on = False
+        self._inside_geo = False
         self._latitude: float | None = None
         self._longitude: float | None = None
-        self._distance_m: float | None = None
         self._last_transition: str | None = None
         self._invert = invert
 
@@ -354,25 +368,40 @@ class PolyZoneBinarySensor(BinarySensorEntity):
             "device_tracker": self._device_tracker_entity_id,
             "latitude": self._latitude,
             "longitude": self._longitude,
-            "distance_to_edge_m": self._distance_m,
+            "distance_to_edge_m": self._compute_distance_m(),
             "last_transition": self._last_transition,
             "invert": self._invert,
         }
 
-    async def async_added_to_hass(self) -> None:
-        self.async_on_remove(
-            async_track_state_change_event(
-                self.hass, self._device_tracker_entity_id, self._handle_state_change
+    def _compute_distance_m(self) -> float | None:
+        """Signed distance (m) to the nearest zone boundary, computed on demand.
+
+        Considers the exterior ring *and* any hole boundaries, so a point near a
+        hole edge reports the small distance to that edge. Negative when the
+        point is geometrically inside the zone, positive when outside.
+        """
+        if self._latitude is None or self._longitude is None:
+            return None
+        raw_dist = _min_distance_to_edges_m(self._longitude, self._latitude, self._edges)
+        for h_edges in self._hole_edges:
+            raw_dist = min(
+                raw_dist,
+                _min_distance_to_edges_m(self._longitude, self._latitude, h_edges),
             )
-        )
+        return -raw_dist if self._inside_geo else raw_dist
+
+    async def async_added_to_hass(self) -> None:
+        # State changes are dispatched centrally by the platform's single
+        # listener; here we only seed the initial state on add.
         if initial_state := self.hass.states.get(self._device_tracker_entity_id):
             self._update_state(initial_state)
             self.async_write_ha_state()
 
     @callback
-    def _handle_state_change(self, event: Event) -> None:
-        if new_state := event.data.get("new_state"):
-            self._update_state(new_state)
+    def update_from_shared_state(self, state: Any) -> None:
+        """Recompute and publish state from a tracker update (shared listener)."""
+        self._update_state(state)
+        if self.hass is not None and self.entity_id:
             self.async_write_ha_state()
 
     def _update_state(self, state: Any) -> None:
@@ -398,13 +427,11 @@ class PolyZoneBinarySensor(BinarySensorEntity):
                     if _point_in_polygon_fast(point, h_poly, h_edges, h_bbox):
                         inside_geo = False
                         break
+            self._inside_geo = inside_geo
             self._is_on = (not inside_geo) if self._invert else inside_geo
-            raw_dist = _min_distance_to_edges_m(self._longitude, self._latitude, self._edges)
-            # Negative = inside the exterior boundary, positive = outside.
-            self._distance_m = -raw_dist if inside_geo else raw_dist
         else:
+            self._inside_geo = False
             self._is_on = False
-            self._distance_m = None
 
         if prev != self._is_on:
             self._last_transition = datetime.now(timezone.utc).isoformat()
