@@ -4,11 +4,16 @@ Polygon Zone is a custom Home Assistant integration that creates binary sensors 
 
 ## Features
 
-- Supports GeoJSON `Polygon` and `MultiPolygon` geometry.
-- Optional tolerance zones using approximate polygon offsetting.
-- Fast point-in-polygon evaluation using precomputed bounding boxes and edges.
+- Supports GeoJSON `Polygon` and `MultiPolygon` geometry, including holes.
+- Optional tolerance zones using accurate metre-based polygon offsetting.
+- Fast point-in-polygon evaluation using prepared Shapely geometries.
 - Optional GeoJSON file watching with automatic config-entry reload.
 - Emits enter/exit events for automations.
+- Each zone appears as its own device; zones named via a `name` (or `title`) feature property keep stable entity IDs even if the file is reordered.
+
+## Requirements
+
+- Home Assistant 2026.1.0 or newer.
 
 ## Installation
 
@@ -32,8 +37,14 @@ After setup, you can tune:
 
 - `tolerance`: Override tolerance distance.
 - `invert`: Flip logic to treat outside as active.
-- `watch_geojson`: Enable/disable periodic file mtime checks.
+- `watch_geojson`: Enable/disable periodic file change checks (mtime + size).
 - `watch_interval`: Reload polling interval in seconds (minimum 5).
+
+### Reconfigure
+
+The name, GeoJSON path, device tracker and tolerance can be changed later
+without removing the integration: open the entry's menu in
+**Settings → Devices & Services** and choose **Reconfigure**.
 
 ## Events
 
@@ -45,6 +56,7 @@ The integration fires these events:
 Event payload includes:
 
 - `entity_id`
+- `zone_name`
 - `device_tracker`
 - `in_zone`
 - `lat`
@@ -54,4 +66,11 @@ Event payload includes:
 
 - The config flow validates that the file exists and that at least one feature has supported geometry.
 - GeoJSON coordinates are normalized to numeric longitude/latitude pairs before sensors are created.
-- If no valid polygon rings are found, entities are not created and an error is logged.
+- If the GeoJSON file cannot be read at startup (for example a network share that is not mounted yet), setup is retried automatically; a malformed file or one with no valid polygons puts the entry in an error state with the reason shown in the UI.
+- Self-intersecting polygons are repaired automatically (a warning is logged).
+- Polygons crossing the antimeridian (180° longitude) are not supported.
+
+## Upgrading from 0.7.x
+
+- Each zone now gets its own device (previously all zones shared one device whose name was arbitrary). After upgrading, an empty leftover device may remain; it can be deleted from the device page.
+- Zones with a `name` (or `title`) property now derive their entity unique IDs from that name instead of their position in the file. Entities for *named* zones will therefore be created fresh once (history under the old entity IDs is not carried over); unnamed zones keep their previous IDs.

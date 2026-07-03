@@ -1,7 +1,7 @@
 {
   "domain": "poly_zone",
   "name": "Polygon Zone",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "documentation": "https://github.com/holdestmade/poly-zone",
   "issue_tracker": "https://github.com/holdestmade/poly-zone/issues",
   "codeowners": [
@@ -17,5 +17,5 @@
   "loggers": [
     "custom_components.poly_zone"
   ],
-  "homeassistant": "2024.1.0"
+  "homeassistant": "2026.1.0"
 }
