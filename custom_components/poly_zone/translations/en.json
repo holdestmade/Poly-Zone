@@ -10,23 +10,37 @@
           "device_tracker": "Device tracker",
           "tolerance": "Tolerance (meters)"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Polygon Zone",
+        "description": "Update the GeoJSON file, device tracker, name or tolerance for this zone.",
+        "data": {
+          "name": "Name",
+          "geojson_path": "GeoJSON file path",
+          "device_tracker": "Device tracker",
+          "tolerance": "Tolerance (meters)"
+        }
       }
     },
     "error": {
-      "file_not_found": "File not found.",
+      "file_not_found": "File not found (or the path is not a file).",
       "invalid_geojson": "Invalid GeoJSON file.",
       "no_features": "No features found in the file.",
       "unsupported_geom": "Only Polygon or MultiPolygon geometries are supported."
     },
-    "options": {
-      "step": {
-        "init": {
-          "data": {
-            "tolerance": "Tolerance (meters)",
-            "invert": "Invert zone logic (on when OUTSIDE)",
-            "watch_geojson": "Auto-reload when GeoJSON file changes",
-            "watch_interval": "Watch interval (seconds)"
-          }
+    "abort": {
+      "already_configured": "This GeoJSON file and device tracker combination is already configured.",
+      "reconfigure_successful": "Reconfiguration was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "tolerance": "Tolerance (meters)",
+          "invert": "Invert zone logic (on when OUTSIDE)",
+          "watch_geojson": "Auto-reload when GeoJSON file changes",
+          "watch_interval": "Watch interval (seconds)"
         }
       }
     }
